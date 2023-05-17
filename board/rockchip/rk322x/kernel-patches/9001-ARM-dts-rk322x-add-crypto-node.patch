@@ -1,0 +1,44 @@
+From 3e6a049ab8be1b3c93004c642295a4045e773ade Mon Sep 17 00:00:00 2001
+From: Michele Zuccalà <ardutu@gmail.com>
+To: Heiko Stuebner <heiko@sntech.de>
+Cc: Rob Herring <robh+dt@kernel.org>, Krzysztof Kozlowski <krzysztof.kozlowski+dt@linaro.org>, linux-arm-kernel@lists.infradead.org, linux-rockchip@lists.infradead.org, devicetree@vger.kernel.org,  Alex Bee <knaerzche@gmail.com>
+Subject: [PATCH] arm: dts: rockchip: add crypto node for RK322x
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The cryptographic hardware of the rk322x is compatible with the one present in the rk3288.
+
+Add the respective node to the device tree.
+
+Signed-off-by: Alex Bee <knaerzche@gmail.com>
+Signed-off-by: Michele Zuccalà <ardutu@gmail.com>
+---
+ arch/arm/boot/dts/rk322x.dtsi | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/arch/arm/boot/dts/rk322x.dtsi b/arch/arm/boot/dts/rk322x.dtsi
+index ffc16d6b9..b381fc2a0 100644
+--- a/arch/arm/boot/dts/rk322x.dtsi
++++ b/arch/arm/boot/dts/rk322x.dtsi
+@@ -132,6 +132,17 @@ display_subsystem: display-subsystem {
+ 		ports = <&vop_out>;
+ 	};
+ 
++	crypto: crypto@100a0000 {
++		compatible = "rockchip,rk3288-crypto";
++		reg = <0x100a0000 0x4000>;
++		interrupts = <GIC_SPI 30 IRQ_TYPE_LEVEL_HIGH>;
++		clocks = <&cru HCLK_M_CRYPTO>, <&cru HCLK_S_CRYPTO>,
++			 <&cru SCLK_CRYPTO>, <&cru ACLK_DMAC>;
++		clock-names = "aclk", "hclk", "sclk", "apb_pclk";
++		resets = <&cru SRST_CRYPTO>;
++		reset-names = "crypto-rst";
++	};
++
+ 	i2s1: i2s1@100b0000 {
+ 		compatible = "rockchip,rk3228-i2s", "rockchip,rk3066-i2s";
+ 		reg = <0x100b0000 0x4000>;
+-- 
+2.35.3
+

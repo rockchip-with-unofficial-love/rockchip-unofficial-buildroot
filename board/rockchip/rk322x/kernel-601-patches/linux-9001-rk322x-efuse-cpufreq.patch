@@ -1,0 +1,266 @@
+diff -ruPN linux-6.1.19/drivers/cpufreq/Kconfig.arm linux-new/drivers/cpufreq/Kconfig.arm
+--- linux-6.1.19/drivers/cpufreq/Kconfig.arm	2023-03-13 10:21:32.000000000 +0100
++++ linux-new/drivers/cpufreq/Kconfig.arm	2023-03-27 17:46:02.634481934 +0200
+@@ -357,3 +357,15 @@
+ 	  This add the CPUFreq driver support for Intel PXA2xx SOCs.
+ 
+ 	  If in doubt, say N.
++
++config ARM_ROCKCHIP_RK322x_CPUFREQ_NVMEM
++	bool "Rockchip nvmem based rk3228/9 CPUFreq driver"
++	depends on ARCH_ROCKCHIP
++	depends on NVMEM_ROCKCHIP_EFUSE
++	select PM_OPP
++	help
++	  This adds the nvmem based CPUFreq driver for Rockchip
++	  rk3228/9 SoC.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called rk322x-cpufreq-nvmem.
+diff -ruPN linux-6.1.19/drivers/cpufreq/Makefile linux-new/drivers/cpufreq/Makefile
+--- linux-6.1.19/drivers/cpufreq/Makefile	2023-03-13 10:21:32.000000000 +0100
++++ linux-new/drivers/cpufreq/Makefile	2023-03-27 14:42:41.109021370 +0200
+@@ -91,7 +91,7 @@
+ obj-$(CONFIG_ARM_TEGRA194_CPUFREQ)	+= tegra194-cpufreq.o
+ obj-$(CONFIG_ARM_TI_CPUFREQ)		+= ti-cpufreq.o
+ obj-$(CONFIG_ARM_VEXPRESS_SPC_CPUFREQ)	+= vexpress-spc-cpufreq.o
+-
++obj-$(CONFIG_ARM_ROCKCHIP_RK322x_CPUFREQ_NVMEM) += rk322x-cpufreq-nvmem.o
+ 
+ ##################################################################################
+ # PowerPC platform drivers
+diff -ruPN linux-6.1.19/drivers/cpufreq/cpufreq-dt-platdev.c linux-new/drivers/cpufreq/cpufreq-dt-platdev.c
+--- linux-6.1.19/drivers/cpufreq/cpufreq-dt-platdev.c	2023-03-13 10:21:32.000000000 +0100
++++ linux-new/drivers/cpufreq/cpufreq-dt-platdev.c	2023-03-28 11:13:36.610113233 +0200
+@@ -71,7 +71,6 @@
+ 	{ .compatible = "rockchip,rk3066a", },
+ 	{ .compatible = "rockchip,rk3066b", },
+ 	{ .compatible = "rockchip,rk3188", },
+-	{ .compatible = "rockchip,rk3228", },
+ 	{ .compatible = "rockchip,rk3288", },
+ 	{ .compatible = "rockchip,rk3328", },
+ 	{ .compatible = "rockchip,rk3366", },
+@@ -158,6 +157,9 @@
+ 	{ .compatible = "st,stih410", },
+ 	{ .compatible = "st,stih418", },
+ 
++	{ .compatible = "rockchip,rk3228", },
++	{ .compatible = "rockchip,rk3229", },
++	
+ 	{ .compatible = "ti,am33xx", },
+ 	{ .compatible = "ti,am43", },
+ 	{ .compatible = "ti,dra7", },
+diff -ruPN linux-6.1.19/drivers/cpufreq/rk322x-cpufreq-nvmem.c linux-new/drivers/cpufreq/rk322x-cpufreq-nvmem.c
+--- linux-6.1.19/drivers/cpufreq/rk322x-cpufreq-nvmem.c	1970-01-01 01:00:00.000000000 +0100
++++ linux-new/drivers/cpufreq/rk322x-cpufreq-nvmem.c	2023-03-28 11:04:43.394090910 +0200
+@@ -0,0 +1,210 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Rockchip rk3228/9 CPUFreq nvmem based driver
++ *
++ * The rk322x-cpufreq-nvmem driver reads the efuse value from the SoC to
++ * provide the OPP framework with required information.
++ * based on sun50i-cpufreq-nvmem
++ *
++ * Copyright (C) 2019 Yangtao Li <tiny.windzz@gmail.com>
++ * Copyright (C) 2023 Michele Zuccalà <ardutu@gmail.com>
++ */
++
++#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
++
++#include <linux/dev_printk.h>
++#include <linux/module.h>
++#include <linux/nvmem-consumer.h>
++#include <linux/of_device.h>
++#include <linux/platform_device.h>
++#include <linux/pm_opp.h>
++#include <linux/slab.h>
++
++#define MAX_NAME_LEN	7
++
++#define NVMEM_MASK	0x7
++#define NVMEM_SHIFT	5
++
++static struct platform_device *cpufreq_dt_pdev, *rk322x_cpufreq_pdev;
++
++/**
++ * sun50i_cpufreq_get_efuse() - Determine speed grade from efuse value
++ * @versions: Set to the value parsed from efuse
++ *
++ * Returns 0 if success.
++ */
++static int rk322x_cpufreq_get_efuse(u32 *versions)
++{
++	struct nvmem_cell *cpuleakage_nvmem;
++	struct device_node *np;
++	struct device *cpu_dev;
++	unsigned char *cpuleakage, efuse_value;
++	size_t len;
++	int ret;
++
++	cpu_dev = get_cpu_device(0);
++	if (!cpu_dev)
++		return -ENODEV;
++
++	np = dev_pm_opp_of_get_opp_desc_node(cpu_dev);
++	if (!np) {
++		pr_err("no operating points");
++		return -ENOENT;
++	}
++
++	cpuleakage_nvmem = of_nvmem_cell_get(np, "cpu-leakage");
++	of_node_put(np);
++
++	if (IS_ERR(cpuleakage_nvmem))
++		return dev_err_probe(cpu_dev, PTR_ERR(cpuleakage_nvmem),
++				     "Could not get nvmem cell\n");
++	
++	cpuleakage = nvmem_cell_read(cpuleakage_nvmem, &len);
++	nvmem_cell_put(cpuleakage_nvmem);
++	if (IS_ERR(cpuleakage))
++		return PTR_ERR(cpuleakage);
++
++	pr_info("cpuleakage %d", cpuleakage[0]);
++	
++	/*
++	 * We treat unexpected efuse values as if the SoC was from
++	 * the slowest bin. Expected efuse values are 1-3, slowest
++	 * to fastest.
++	 */
++	if (cpuleakage[0] <= 5)
++		*versions = 0;
++	else
++		*versions = 1;
++	
++	return 0;
++};
++
++static int rk322x_cpufreq_nvmem_probe(struct platform_device *pdev)
++{
++	int *opp_tokens;
++	char name[MAX_NAME_LEN];
++	unsigned int cpu;
++	u32 leakage = 0;
++	int ret;
++
++	opp_tokens = kcalloc(num_possible_cpus(), sizeof(*opp_tokens),
++			     GFP_KERNEL);
++	if (!opp_tokens)
++		return -ENOMEM;
++		
++	ret = rk322x_cpufreq_get_efuse(&leakage);
++	if (ret) {
++		kfree(opp_tokens);
++		return ret;
++	}
++		
++	snprintf(name, MAX_NAME_LEN, "L%d", leakage);
++	pr_info("cpu-opp-voltage name %s", name);
++	
++	for_each_possible_cpu(cpu) {
++		struct device *cpu_dev = get_cpu_device(cpu);
++
++		if (!cpu_dev) {
++			ret = -ENODEV;
++			goto free_opp;
++		}
++
++		opp_tokens[cpu] = dev_pm_opp_set_prop_name(cpu_dev, name);
++		if (opp_tokens[cpu] < 0) {
++			ret = opp_tokens[cpu];
++			pr_err("Failed to set prop name\n");
++			goto free_opp;
++		}
++	}
++
++	cpufreq_dt_pdev = platform_device_register_simple("cpufreq-dt", -1,
++							  NULL, 0);
++	if (!IS_ERR(cpufreq_dt_pdev)) {
++		platform_set_drvdata(pdev, opp_tokens);
++		return 0;
++	}
++
++	ret = PTR_ERR(cpufreq_dt_pdev);
++	pr_err("Failed to register platform device\n");
++
++free_opp:
++	for_each_possible_cpu(cpu)
++		dev_pm_opp_put_prop_name(opp_tokens[cpu]);
++	kfree(opp_tokens);
++
++	return ret;
++}
++
++static int rk322x_cpufreq_nvmem_remove(struct platform_device *pdev)
++{
++	return 0;
++}
++
++static const struct of_device_id rk322x_cpufreq_match_list[] = {
++	{ .compatible = "rockchip,rk3228" },
++	{ .compatible = "rockchip,rk3229" },
++	{}
++};
++
++MODULE_DEVICE_TABLE(of, rk322x_cpufreq_match_list);
++
++/*
++ * Since the driver depends on nvmem drivers, which may return EPROBE_DEFER,
++ * all the real activity is done in the probe, which may be defered as well.
++ * The init here is only registering the driver and the platform device.
++ */
++static struct platform_driver rk322x_cpufreq_driver = {
++	.probe = rk322x_cpufreq_nvmem_probe,
++	.remove = rk322x_cpufreq_nvmem_remove,
++	.driver = {
++		.name = "rk322x-cpufreq-nvmem",
++	},
++};
++
++static const struct of_device_id *rk322x_cpufreq_match_node(void)
++{
++	const struct of_device_id *match;
++	struct device_node *np;
++
++	np = of_find_node_by_path("/");
++	match = of_match_node(rk322x_cpufreq_match_list, np);
++	of_node_put(np);
++
++	return match;
++}
++
++
++static int __init rk322x_cpufreq_init(void)
++{
++	const struct of_device_id *match;
++	int ret;
++
++	match = rk322x_cpufreq_match_node();
++	if (!match)
++		return -ENODEV;
++
++	ret = platform_driver_register(&rk322x_cpufreq_driver);
++	if (unlikely(ret < 0))
++		return ret;
++
++	rk322x_cpufreq_pdev =
++		platform_device_register_simple("rk322x-cpufreq-nvmem",
++						-1, NULL, 0);
++	ret = PTR_ERR_OR_ZERO(rk322x_cpufreq_pdev);
++	if (ret == 0)
++		return 0;
++
++	platform_driver_unregister(&rk322x_cpufreq_driver);
++	return ret;
++}
++module_init(rk322x_cpufreq_init);
++
++static void __exit rk322x_cpufreq_exit(void)
++{
++	platform_device_unregister(rk322x_cpufreq_pdev);
++	platform_driver_unregister(&rk322x_cpufreq_driver);
++}
++module_exit(rk322x_cpufreq_exit);
++
++MODULE_DESCRIPTION("Rockchip 3228/9 cpufreq driver");
++MODULE_LICENSE("GPL v2");
